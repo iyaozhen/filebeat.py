@@ -1,0 +1,18 @@
+{
+    "filebeat": {
+        "path": "/home/work/apache/logs/access_log.%s",
+        "date_ext": "%Y%m%d%H",
+        "include_lines": ["LOG ERROR", "LOG WARNING"],
+        "exclude_lines": null,
+        "encoding": "utf-8",
+        "fields": {
+            "app_name": "filebeat_python"
+        }
+    },
+    "logstash": {
+        "hosts": [
+            "10.81.8.149:5055",
+            "10.81.7.193:5055"
+        ]
+    }
+}
