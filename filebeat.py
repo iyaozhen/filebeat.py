@@ -212,22 +212,33 @@ class FileBeat(object):
                 return True
 
     @staticmethod
-    def tail_file(file_path):
+    def tail_file(file_path, from_head=False):
         """
         创建子进程tail file
         Args:
             file_path: 文件路径
+            from_head: 是否重头开始读取文件
 
         Returns:
 
         """
-        process = subprocess.Popen(['tail', '-F', file_path],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # https://docs.python.org/2/library/select.html
-        poll = select.epoll()
-        poll.register(process.stdout)
+        if from_head is True:
+            # 先输出现有文件全部内容, 然后tail文件
+            # -F 当文件变化时能切换到新的文件
+            cmd = "cat %s && tail -F %s" % (file_path, file_path)
+        else:
+            cmd = "tail -F %s" % file_path
 
-        return process, poll
+        try:
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True, bufsize=-1)
+        except OSError, e:
+            return False, str(e)
+        else:
+            # https://docs.python.org/2/library/select.html
+            poll = select.epoll()
+            poll.register(process.stdout)
+
+            return process, poll
 
     @staticmethod
     def get_current_path(file_path, file_ext):
@@ -355,8 +366,11 @@ def run():
                 time.sleep(60)
                 current_file_path = FileBeat.get_current_path(file_path, file_date_ext)
             # 创建子进程tail文件
-            logging.info("start tail file", current_file_path)
-            (process, poll) = FileBeat.tail_file(current_file_path)
+            logging.info("start tail file " + current_file_path)
+            (process, poll) = FileBeat.tail_file(current_file_path, True)
+            if process is False:
+                error_str = poll
+                logging.error(error_str)
             # 轮训子进程是否获取到数据
             while True:
                 if poll.poll(1):  # timeout 1s
@@ -369,9 +383,8 @@ def run():
                         else:
                             logging.info("publish to logstash success")
                 else:
-                    # 没有读取到内容则判断一下是否需要切换文件
+                    # 若当前目标日志文件名变化, 则跳出循环, 读取新的文件
                     current_file_path = FileBeat.get_current_path(file_path, file_date_ext)
-                    # 若当前目标日志文件名变化, 则跳出循环
                     if current_file_path != last_file_path:
                         poll.unregister(process.stdout)
                         process.kill()

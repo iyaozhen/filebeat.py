@@ -5,3 +5,4 @@ Python版Filebeat(https://www.elastic.co/products/beats/filebeat)
 ```
 python filebeat.py filebeat.json
 ```
+### 配置
