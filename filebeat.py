@@ -231,7 +231,7 @@ class FileBeat(object):
 
         try:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True, bufsize=-1)
-        except OSError, e:
+        except OSError as e:
             return False, str(e)
         else:
             # https://docs.python.org/2/library/select.html
