@@ -19,7 +19,8 @@ import sys
 import os
 import logging
 import logging.handlers
-import threading
+import Queue
+import multiprocessing
 
 
 class FileBeat(object):
@@ -340,7 +341,48 @@ class FileBeat(object):
         logger.addHandler(handler)
 
 
-def worker(prospector, queue):
+def worker(sockets, prospector, queue):
+    file_path = prospector['path']
+    file_date_ext = prospector['date_ext']
+    encoding = prospector['encoding']
+    include_lines = prospector['include_lines']
+    exclude_lines = prospector['exclude_lines']
+    fields = prospector['fields']
+
+    current_file_path = FileBeat.get_current_path(file_path, file_date_ext)
+    last_file_path = current_file_path
+    # 如果文件不存在, 等待当前文件生成
+    logging.info("waiting file %s create" % current_file_path)
+    while FileBeat.is_non_zero_file(current_file_path) is False:
+        time.sleep(60)
+        current_file_path = FileBeat.get_current_path(file_path, file_date_ext)
+    while True:
+        # 创建子进程tail文件
+        logging.info("start tail file " + current_file_path)
+        (process, poll) = FileBeat.tail_file(current_file_path, True)
+        if process is False:
+            error_str = poll
+            logging.error(error_str)
+        # 轮训子进程是否获取到数据
+        while True:
+            if poll.poll(1):  # timeout 1s
+                data = process.stdout.readline().rstrip()
+                # 统一转换为unicode编码
+                data_unicode = data.decode(encoding, 'ignore')
+                queue.put(data_unicode)
+                # if FileBeat.data_filter(data_unicode, include_lines, exclude_lines):
+                #     if FileBeat.publish_to_logstash(sockets, data_unicode, fields) is False:
+                #         logging.error("publish to logstash fail [%s]" % data)
+                #     else:
+                #         logging.info("publish to logstash success")
+            else:
+                # 若当前目标日志文件名变化, 则跳出循环, 读取新的文件
+                current_file_path = FileBeat.get_current_path(file_path, file_date_ext)
+                if current_file_path != last_file_path:
+                    poll.unregister(process.stdout)
+                    process.kill()
+                    last_file_path = current_file_path
+                    break
 
 
 def run():
@@ -367,42 +409,9 @@ def run():
     if sockets is False:
         sys.exit("error: can not connect logstash clusters")
 
-    for index in range(len(prospectors)):
-        prospector = prospectors[index]
-        file_path = prospector['path']
-        file_date_ext = prospector['date_ext']
-        current_file_path = FileBeat.get_current_path(file_path, file_date_ext)
-        # prospectors[index] = current_file_path
-        logging.info("waiting file %s create" % current_file_path)
-        t = threading.Thread(target=FileBeat.wait_file(current_file_path, file_path, file_date_ext))
-        t.start()
-
-    while True:
-        # 创建子进程tail文件
-        logging.info("start tail file " + current_file_path)
-        (process, poll) = FileBeat.tail_file(current_file_path, True)
-        if process is False:
-            error_str = poll
-            logging.error(error_str)
-        # 轮训子进程是否获取到数据
-        while True:
-            if poll.poll(1):  # timeout 1s
-                data = process.stdout.readline().rstrip()
-                # 统一转换为unicode编码
-                data_unicode = data.decode(encoding, 'ignore')
-                if FileBeat.data_filter(data_unicode, include_lines, exclude_lines):
-                    if FileBeat.publish_to_logstash(sockets, data_unicode, fields) is False:
-                        logging.error("publish to logstash fail [%s]" % data)
-                    else:
-                        logging.info("publish to logstash success")
-            else:
-                # 若当前目标日志文件名变化, 则跳出循环, 读取新的文件
-                current_file_path = FileBeat.get_current_path(file_path, file_date_ext)
-                if current_file_path != last_file_path:
-                    poll.unregister(process.stdout)
-                    process.kill()
-                    last_file_path = current_file_path
-                    break
+    q = Queue.Queue(maxsize=9999)
+    for prospector in prospectors:
+        multiprocessing.Process(target=worker, args=(sockets, prospector, q))
 
 if __name__ == "__main__":
-    # run()
+    run()
