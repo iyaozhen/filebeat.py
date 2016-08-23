@@ -222,12 +222,14 @@ class FileBeat(object):
         Returns:
 
         """
+        # 安全注释, 防止OP kill子进程
+        safe_comment = "'(Do not kill me, parent PID: %d)'" % os.getpid()
         if from_head is True:
             # 先输出现有文件全部内容, 然后tail文件
             # -F 当文件变化时能切换到新的文件
-            cmd = "cat %s && tail -F %s" % (file_path, file_path)
+            cmd = "cat %s && tail -F %s %s" % (file_path, file_path, safe_comment)
         else:
-            cmd = "tail -F %s" % file_path
+            cmd = "tail -F %s %s" % (file_path, safe_comment)
 
         try:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True, bufsize=-1)
