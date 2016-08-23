@@ -1,5 +1,5 @@
 {
-    "prospectors": [{
+    "filebeat": {
         "path": "/home/work/apache/logs/access_log.%s",
         "date_ext": "%Y%m%d%H",
         "include_lines": ["LOG ERROR", "LOG WARNING"],
@@ -8,16 +8,7 @@
         "fields": {
             "app_name": "filebeat_python"
         }
-    }, {
-        "path": "/home/work/apache/logs/access_log.%s",
-        "date_ext": "%Y%m%d%H",
-        "include_lines": ["LOG ERROR", "LOG WARNING"],
-        "exclude_lines": null,
-        "encoding": "utf-8",
-        "fields": {
-            "app_name": "filebeat_python"
-        }
-    }],
+    },
     "logstash": {
         "hosts": [
             "00.00.00.01:5055",
