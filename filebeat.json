@@ -18,6 +18,9 @@
             "app_name": "filebeat_python"
         }
     }],
+    "filebeat": {
+        "queue_maxsize": 100000
+    },
     "logstash": {
         "hosts": [
             "00.00.00.01:5055",
