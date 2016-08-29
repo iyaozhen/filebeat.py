@@ -6,7 +6,7 @@
 Authors: iyaozhen
 Date: 2016-04-20
 Since: v2.0 2016-8-28
-多日志支持
+多日志文件支持
 """
 
 import socket
@@ -21,6 +21,7 @@ import logging
 import logging.handlers
 import Queue
 import multiprocessing
+import signal
 
 
 class FileBeat(object):
@@ -249,10 +250,10 @@ class FileBeat(object):
             return False, str(e)
         else:
             # https://docs.python.org/2/library/select.html
-            poll = select.epoll()
-            poll.register(process.stdout)
+            epoll = select.epoll()
+            epoll.register(process.stdout)
 
-            return process, poll
+            return process, epoll
 
     @staticmethod
     def get_current_path(file_path, file_ext):
@@ -293,7 +294,7 @@ class FileBeat(object):
             else False
 
     @staticmethod
-    def init_log(log_path, level=logging.INFO, when="D", backup=7,
+    def init_log(log_path, level=logging.INFO, max_mb=100, backup_count=7,
                  log_format="%(levelname)s: %(asctime)s: %(filename)s:%(lineno)d * %(thread)d %(message)s",
                  datefmt="%m-%d %H:%M:%S"):
         """
@@ -306,14 +307,9 @@ class FileBeat(object):
           level:         - msg above the level will be displayed
                            DEBUG < INFO < WARNING < ERROR < CRITICAL
                            the default value is logging.INFO
-          when:          - how to split the log file by time interval
-                           'S' : Seconds
-                           'M' : Minutes
-                           'H' : Hours
-                           'D' : Days
-                           'W' : Week day
-                           default value: 'D'
-          backup:        - how many backup file to keep
+          max_mb:     - a file max size(MB)
+                           default value: 1000*1000*100=100MB
+          backup_count:  - how many backup file to keep
                            default value: 7
           log_format:    - format of the log
                            default format:
@@ -336,16 +332,17 @@ class FileBeat(object):
         if not os.path.isdir(log_dir):
             os.makedirs(log_dir)
 
-        handler = logging.handlers.TimedRotatingFileHandler(log_path + ".log",
-                                                            when=when,
-                                                            backupCount=backup)
+        max_mb *= 1000 * 1000
+        handler = logging.handlers.RotatingFileHandler(log_path + ".log",
+                                                       maxBytes=max_mb,
+                                                       backupCount=backup_count)
         handler.setLevel(level)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
-        handler = logging.handlers.TimedRotatingFileHandler(log_path + ".log.wf",
-                                                            when=when,
-                                                            backupCount=backup)
+        handler = logging.handlers.RotatingFileHandler(log_path + ".log.wf",
+                                                       maxBytes=max_mb,
+                                                       backupCount=backup_count)
         handler.setLevel(logging.WARNING)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
@@ -369,13 +366,13 @@ class FileBeat(object):
         while True:
             # 创建子进程tail文件
             logging.info("start tail file %s" + current_file_path)
-            (process, poll) = FileBeat.tail_file(current_file_path, True)
+            (process, epoll) = FileBeat.tail_file(current_file_path, True)
             if process is False:
-                error_str = poll
+                error_str = epoll
                 logging.error(error_str)
             # 轮训子进程是否获取到数据
             while True:
-                if poll.poll(1):  # timeout 1s
+                if epoll.poll(1):  # timeout 1s
                     data = process.stdout.readline().rstrip()
                     logging.debug("get data form subprocess.PIPE [%s]", data)
                     # 统一转换为unicode编码
@@ -400,8 +397,16 @@ class FileBeat(object):
                     # 若当前目标日志文件名变化, 则跳出循环, 读取新的文件
                     current_file_path = FileBeat.get_current_path(file_path, file_date_ext)
                     if current_file_path != last_file_path:
-                        poll.unregister(process.stdout)
-                        process.kill()
+                        try:
+                            epoll.unregister(process.stdout)
+                            epoll.close()
+                        except KeyError:
+                            logging.error("epoll object unregister or close error")
+                        try:
+                            process.send_signal(signal.SIGINT)
+                            process.kill()
+                        except OSError:
+                            logging.error("kill sub process error")
                         last_file_path = current_file_path
                         break
 
