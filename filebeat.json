@@ -1,8 +1,8 @@
 {
     "prospectors": [{
-        "path": "/home/work/apache/logs/access_log.%s",
+        "path": "/home/work/apache/logs/error_log.%s",
         "date_ext": "%Y%m%d%H",
-        "include_lines": ["LOG ERROR", "LOG WARNING"],
+        "include_lines": null,
         "exclude_lines": null,
         "encoding": "utf-8",
         "fields": {
@@ -25,6 +25,7 @@
         "hosts": [
             "00.00.00.01:5055",
             "00.00.00.02:5055"
-        ]
+        ],
+        "re_connect_per": 10000
     }
 }
