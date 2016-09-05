@@ -28,12 +28,39 @@ class FileBeat(object):
     """
     py filebeat 类
     """
-    @classmethod
-    def publish_to_logstash(cls, sockets, data, re_connect_per=10000):
+    def __init__(self, config_file):
+        self.subprocess_list = []
+        self.epoll_list = []
+
+        try:
+            with open(config_file, 'r') as f:
+                conf = json.load(f)
+        except IOError:
+            sys.exit("read config file error")
+        else:
+            try:
+                self.prospectors = conf['prospectors']
+                self.filebeat_conf = conf['filebeat']
+                self.logstash_conf = conf['logstash']
+            except KeyError as e:
+                sys.exit(e)
+            else:
+                self.init_log(self.filebeat_conf['logging']['path'],
+                              self.filebeat_conf['logging']['level'])
+
+                signal.signal(signal.SIGINT, self.signal_handler)
+                signal.signal(signal.SIGTERM, self.signal_handler)
+
+                self.sockets = self.get_sockets(self.logstash_conf)
+                if self.sockets is False:
+                    con_fail = "[error] can not connect logstash clusters"
+                    logging.error(con_fail)
+                    sys.exit()
+
+    def publish_to_logstash(self, data, re_connect_per=10000):
         """
         发布数据到logstash集群
         Args:
-            sockets: 已经和logstash建立的长连接dict
             data: 需要推送的数据
                 发出去的是个json格式数据包, 可以很方便设置一些自定义字段, logtash接收数据时配置:
                 input {
@@ -47,33 +74,30 @@ class FileBeat(object):
         Returns:
             如果成功返回已发送内容的字节大小,失败返回False
         """
-        # 没有可用通道
-        if sockets is False:
+        # 随机选取出一个有效的socket通道（负载均衡）
+        random_address = self.__random_choice_socket(self.sockets)
+        # 全部通道不可用,触发重连
+        if random_address is False:
+            self.re_connect(self.sockets)
+            # 直接返回失败,本次数据丢失
             return False
         else:
-            # 随机选取出一个有效的socket通道（负载均衡）
-            random_address = cls.__random_choice_socket(sockets)
-            # 全部通道不可用,触发重连
-            if random_address is False:
-                cls.re_connect(sockets)
-                # 直接返回失败,本次数据丢失
-                return False
+            # 概率触发重连
+            if self.__random_trigger(re_connect_per):
+                self.re_connect(self.sockets)
+            try:
+                res = self.sockets[random_address].sendall(data + '\r\n')
+            except socket.error:
+                if random_address is not False:
+                    # 将出错的socket置为False
+                    self.sockets[random_address] = False
+                # 尝试重连
+                self.re_connect(self.sockets)
+                # 尝试重新发送
+                # TODO 失败数据持久化存储
+                return self.publish_to_logstash(data, re_connect_per)
             else:
-                # 概率触发重连
-                if cls.__random_trigger(re_connect_per):
-                    cls.re_connect(sockets)
-                try:
-                    res = sockets[random_address].sendall(data + '\r\n')
-                except socket.error:
-                    if random_address is not False:
-                        # 将出错的socket置为False
-                        sockets[random_address] = False
-                    # 尝试重连
-                    cls.re_connect(sockets)
-                    # 尝试重新发送
-                    return cls.publish_to_logstash(sockets, data, re_connect_per)
-                else:
-                    return res
+                return res
 
     @staticmethod
     def get_socket(address):
@@ -87,7 +111,7 @@ class FileBeat(object):
         """
         (ip, port) = address.split(':')
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)  # 在客户端开启心跳维护
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)  # 在客户端开启心跳维持
         try:
             s.connect((ip, int(port)))
         except socket.error:
@@ -95,10 +119,9 @@ class FileBeat(object):
         else:
             return s
 
-    @classmethod
-    def get_sockets(cls, addresses):
+    def get_sockets(self, addresses):
         """
-        根据一批配置信息建立tcp连接
+        根据配置信息建立tcp连接
         Args:
             addresses: host:name的list
 
@@ -107,55 +130,46 @@ class FileBeat(object):
         """
         sockets = {}
         for address in addresses:
-            sockets[address] = cls.get_socket(address)
+            sockets[address] = self.get_socket(address)
         # 建立连接都没有成功
-        if cls.sockets_all_fail(sockets):
+        if self.sockets_is_all_fail():
             return False
         else:
             return sockets
 
-    @classmethod
-    def re_connect(cls, sockets):
+    def re_connect(self):
         """
         重建连接
-        Args:
-            sockets: socket dict
 
         Returns:
             None
         """
-        for address, socket in sockets.iteritems():
+        for address, socket in self.sockets.iteritems():
             if socket is False:
-                sockets[address] = cls.get_socket(address)
+                self.sockets[address] = self.get_socket(address)
 
-    @staticmethod
-    def sockets_all_fail(sockets):
+    def sockets_is_all_fail(self):
         """
         检查已经建立连接的sockets是否都挂了
-        Args:
-            sockets: socket dict
 
         Returns:
             bool
         """
-        for socket in sockets.values():
+        for socket in self.sockets.values():
             if socket is not False:
                 return False
 
         return True
 
-    @staticmethod
-    def __random_choice_socket(sockets):
+    def __random_choice_socket(self):
         """
         随机选择一个可用的通道
-        Args:
-            sockets: sockets dict
 
         Returns:
             socket object, if all failure return False
         """
         real_sockets = {}
-        for address, socket in sockets.iteritems():
+        for address, socket in self.sockets.iteritems():
             if socket is not False:
                 real_sockets[address] = socket
 
@@ -192,8 +206,7 @@ class FileBeat(object):
         """
         return any(temp in string for temp in search)
 
-    @classmethod
-    def data_filter(cls, data, include_lines=None, exclude_lines=None):
+    def data_filter(self, data, include_lines=None, exclude_lines=None):
         """
         数据过滤器, 检测数据是否可以通过过滤
         Args:
@@ -206,10 +219,10 @@ class FileBeat(object):
         """
         if include_lines is not None:
             # 有白名单则需至少命中一个才能通过
-            if cls.__list_in_string(include_lines, data):
+            if self.__list_in_string(include_lines, data):
                 if exclude_lines is not None:
                     # 黑名单命中一个就不能通过
-                    if cls.__list_in_string(exclude_lines, data):
+                    if self.__list_in_string(exclude_lines, data):
                         return False
                     else:
                         return True
@@ -219,7 +232,7 @@ class FileBeat(object):
                 return False
         else:
             if exclude_lines is not None:
-                if cls.__list_in_string(exclude_lines, data):
+                if self.__list_in_string(exclude_lines, data):
                     return False
                 else:
                     return True
@@ -347,14 +360,13 @@ class FileBeat(object):
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
-    @classmethod
-    def prospector(cls, prospector_conf, queue, subprocess_list, from_head=True):
-        file_path = prospector_conf['path']
-        file_date_ext = prospector_conf['date_ext']
-        encoding = prospector_conf['encoding']
-        include_lines = prospector_conf['include_lines']
-        exclude_lines = prospector_conf['exclude_lines']
-        fields = prospector_conf['fields']
+    def prospector(self, prospector, queue, from_head=True):
+        file_path = prospector['path']
+        file_date_ext = prospector['date_ext']
+        encoding = prospector['encoding']
+        include_lines = prospector['include_lines']
+        exclude_lines = prospector['exclude_lines']
+        fields = prospector['fields']
 
         current_file_path = FileBeat.get_current_path(file_path, file_date_ext)
         last_file_path = current_file_path
@@ -371,8 +383,8 @@ class FileBeat(object):
                 error_str = epoll
                 logging.error(error_str)
             else:
-                if process not in subprocess_list:
-                    subprocess_list.append(process)
+                if process not in self.subprocess_list:
+                    self.subprocess_list.append(process)
             # 轮训子进程是否获取到数据
             while True:
                 if epoll.poll(1):  # timeout 1s
@@ -417,43 +429,46 @@ class FileBeat(object):
                             process.terminate()
                         except OSError:
                             logging.error("kill sub process error")
-                        if process in subprocess_list:
-                            subprocess_list.remove(process)
+                        if process in self.subprocess_list:
+                            self.subprocess_list.remove(process)
                         last_file_path = current_file_path
                         break
 
-    @staticmethod
-    def run(subprocess_list):
+    def signal_handler(self, *args):
+        """
+        safe exit
+        Args:
+            *args:
+
+        Returns:
+            None
+
+        """
+        for indx in xrange(len(self.subprocess_list)):
+            epoll = self.subprocess_list[indx]
+            process = self.epoll_list[indx]
+            # stop tail -F
+            process.send_signal(signal.SIGINT)
+            epoll.unregister(process.stdout)
+            epoll.close()
+            # close sub process
+            logging.info('close sub process %s' % process.pid)
+            process.terminate()
+            process.wait()
+
+        sys.exit('safe exit')
+
+    def run(self):
         """
         主进程，读取配置文件然后创建子进程运行日志收集任务
         Returns:
             None
         """
-        try:
-            conf_file = sys.argv[1]
-        except IndexError:
-            logging.info("use default configure file filebeat.json")
-            conf_file = "filebeat.json"
-
-        with open(conf_file, 'r') as f:
-            conf = json.load(f)
-
-        prospectors = conf['prospectors']
-        q_maxsize = int(conf['filebeat']['queue_maxsize'])
-        logstash_hosts = conf['logstash']['hosts']
-        re_connect_per = int(conf['logstash']['re_connect_per'])
-
-        sockets = FileBeat.get_sockets(logstash_hosts)
-        if sockets is False:
-            con_fail = "[error] can not connect logstash clusters"
-            logging.error(con_fail)
-            sys.exit(con_fail)
-
         # 和线程间使用队列通讯
-        q = Queue.Queue(maxsize=q_maxsize)
-        for prospector_conf in prospectors:
+        q = Queue.Queue(maxsize=self.filebeat_conf['queue_maxsize'])
+        for prospector in self.prospectors:
             t = threading.Thread(target=FileBeat.prospector,
-                                 args=(prospector_conf, q, subprocess_list, False))
+                                 args=(prospector, q, False))
             t.daemon = True
             t.start()
 
@@ -462,8 +477,7 @@ class FileBeat(object):
         while True:
             # block get data from the queue.
             data = q.get()
-            logging.info(data)
-            # print subprocess_list
+            print data
             # if FileBeat.publish_to_logstash(sockets, data, re_connect_per) is False:
             #     logging.error("publish to logstash failure [%s]" % data)
             # else:
@@ -471,27 +485,4 @@ class FileBeat(object):
 
 
 if __name__ == "__main__":
-    subprocess_list = []
-    FileBeat.init_log("./filebeat", logging.INFO)
-
-
-    def signal_handler(*args):
-        """
-        safe exit
-        Args:
-            *args:
-
-        Returns:
-
-        """
-        for process in subprocess_list:
-            print 'exit' + str(process.pid)
-            process.send_signal(signal.SIGINT)
-            process.terminate()
-            process.wait()
-        logging.info('safe exit')
-        sys.exit('safe exit')
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    FileBeat.run(subprocess_list)
+    FileBeat('./filebeat.json').run()

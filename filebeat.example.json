@@ -19,7 +19,11 @@
         }
     }],
     "filebeat": {
-        "queue_maxsize": 100000
+        "queue_maxsize": 100000,
+        "logging": {
+            "path": "./filebeat",
+            "level": "INFO"
+        }
     },
     "logstash": {
         "hosts": [
