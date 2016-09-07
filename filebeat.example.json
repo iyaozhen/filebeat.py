@@ -30,6 +30,7 @@
             "00.00.00.01:5055",
             "00.00.00.02:5055"
         ],
-        "re_connect_per": 10000
+        "re_connect_per": 10000,
+        "socket_type": "TCP"
     }
 }

@@ -7,6 +7,7 @@ Authors: iyaozhen
 Date: 2016-04-20
 Since: v2.0 2016-8-28
 多日志文件支持
+udp支持
 """
 
 import socket
@@ -51,7 +52,7 @@ class FileBeat(object):
                 signal.signal(signal.SIGINT, self.signal_handler)
                 signal.signal(signal.SIGTERM, self.signal_handler)
 
-                self.sockets = self.get_sockets(self.logstash_conf)
+                self.sockets = self.get_sockets(self.logstash_conf['hosts'])
                 if self.sockets is False:
                     con_fail = "[error] can not connect logstash clusters"
                     logging.error(con_fail)
@@ -61,7 +62,7 @@ class FileBeat(object):
         """
         发布数据到logstash集群
         Args:
-            data: 需要推送的数据
+            data: 需要发布的数据
                 发出去的是个json格式数据包, 可以很方便设置一些自定义字段, logtash接收数据时配置:
                 input {
                     tcp {
@@ -75,29 +76,50 @@ class FileBeat(object):
             如果成功返回已发送内容的字节大小,失败返回False
         """
         # 随机选取出一个有效的socket通道（负载均衡）
-        random_address = self.__random_choice_socket(self.sockets)
+        random_address = self.__random_choice_socket()
         # 全部通道不可用,触发重连
         if random_address is False:
-            self.re_connect(self.sockets)
+            self.re_connect()
             # 直接返回失败,本次数据丢失
+            # TODO 失败数据持久化存储
             return False
         else:
             # 概率触发重连
             if self.__random_trigger(re_connect_per):
-                self.re_connect(self.sockets)
+                self.re_connect()
             try:
                 res = self.sockets[random_address].sendall(data + '\r\n')
             except socket.error:
                 if random_address is not False:
-                    # 将出错的socket置为False
+                    # 将出错的socket通道置为False
                     self.sockets[random_address] = False
                 # 尝试重连
-                self.re_connect(self.sockets)
+                self.re_connect()
                 # 尝试重新发送
-                # TODO 失败数据持久化存储
                 return self.publish_to_logstash(data, re_connect_per)
             else:
                 return res
+
+    def publish_to_logstash_udp(self, data):
+        """
+        udp方式发布数据到logstash集群
+        Args:
+            data: 需要发布的数据
+
+        Returns:
+            如果成功返回已发送内容的字节大小,失败返回False
+        """
+        address = random.choice(self.logstash_conf['hosts'])
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        (ip, port) = address.split(':')
+        try:
+            res = s.sendto(data + '\r\n', (ip, int(port)))
+        except socket.error:
+            return False
+        else:
+            return res
+        finally:
+            s.close()
 
     @staticmethod
     def get_socket(address):
@@ -144,9 +166,12 @@ class FileBeat(object):
         Returns:
             None
         """
-        for address, socket in self.sockets.iteritems():
-            if socket is False:
-                self.sockets[address] = self.get_socket(address)
+        if self.sockets:
+            for address, socket in self.sockets.iteritems():
+                if socket is False:
+                    self.sockets[address] = self.get_socket(address)
+        else:
+            return False
 
     def sockets_is_all_fail(self):
         """
@@ -155,11 +180,14 @@ class FileBeat(object):
         Returns:
             bool
         """
-        for socket in self.sockets.values():
-            if socket is not False:
-                return False
+        if self.sockets:
+            for socket in self.sockets.values():
+                if socket is not False:
+                    return False
 
-        return True
+            return True
+        else:
+            return False
 
     def __random_choice_socket(self):
         """
@@ -168,13 +196,16 @@ class FileBeat(object):
         Returns:
             socket object, if all failure return False
         """
-        real_sockets = {}
-        for address, socket in self.sockets.iteritems():
-            if socket is not False:
-                real_sockets[address] = socket
+        if self.sockets:
+            real_sockets = {}
+            for address, socket in self.sockets.iteritems():
+                if socket is not False:
+                    real_sockets[address] = socket
 
-        if real_sockets:
-            return random.choice(real_sockets.keys())
+            if real_sockets:
+                return random.choice(real_sockets.keys())
+            else:
+                return False
         else:
             return False
 
@@ -385,6 +416,8 @@ class FileBeat(object):
             else:
                 if process not in self.subprocess_list:
                     self.subprocess_list.append(process)
+                if epoll not in self.epoll_list:
+                    self.epoll_list.append(epoll)
             # 轮训子进程是否获取到数据
             while True:
                 if epoll.poll(1):  # timeout 1s
@@ -405,8 +438,8 @@ class FileBeat(object):
                                     packaged_data[key] = value
                             packaged_data = json.dumps(packaged_data)
                             logging.debug("packaged data [%s]", data)
-                            # put no wait
                             try:
+                                # 非阻塞方式往队列中放入数据
                                 queue.put(packaged_data, False)
                             except Queue.Full:
                                 logging.error("queue is full, data loss [%s]" % packaged_data)
@@ -431,6 +464,8 @@ class FileBeat(object):
                             logging.error("kill sub process error")
                         if process in self.subprocess_list:
                             self.subprocess_list.remove(process)
+                        if epoll in self.epoll_list:
+                            self.epoll_list.remove(epoll)
                         last_file_path = current_file_path
                         break
 
@@ -447,11 +482,11 @@ class FileBeat(object):
         for indx in xrange(len(self.subprocess_list)):
             epoll = self.subprocess_list[indx]
             process = self.epoll_list[indx]
-            # stop tail -F
+            # 停止 `tail -F`
             process.send_signal(signal.SIGINT)
             epoll.unregister(process.stdout)
             epoll.close()
-            # close sub process
+            # 终止子进程
             logging.info('close sub process %s' % process.pid)
             process.terminate()
             process.wait()
@@ -475,14 +510,24 @@ class FileBeat(object):
         logging.info("all thread is already running")
 
         while True:
-            # block get data from the queue.
+            # 阻塞的方式获取数据
             data = q.get()
-            print data
-            # if FileBeat.publish_to_logstash(sockets, data, re_connect_per) is False:
-            #     logging.error("publish to logstash failure [%s]" % data)
-            # else:
-            #     logging.info("publish to logstash success")
+            if self.logstash_conf['socket_type'].upper() == "UDP":
+                if self.publish_to_logstash_udp(data) is False:
+                    logging.error("publish(udp) to logstash failure [%s]" % data)
+                else:
+                    logging.info("publish(udp) to logstash success")
+            else:
+                if self.publish_to_logstash(data,
+                                            self.logstash_conf['re_connect_per']) is False:
+                    logging.error("publish to logstash failure [%s]" % data)
+                else:
+                    logging.info("publish to logstash success")
 
 
-if __name__ == "__main__":
-    FileBeat('./filebeat.json').run()
+if __name__ == '__main__':
+    if len(sys.argv) > 1:
+        config_file = sys.argv[1]
+    else:
+        config_file = './filebeat.json'
+    FileBeat(config_file).run()
