@@ -14,6 +14,7 @@ nohup python filebeat.py filebeat.json &
     - include_lines: 需要包含行的关键字，`null` 表示所有行都需要
     - exclude_lines: 需要排除行的关键字，`null` 没有行需要排除
     - encoding: 文件编码
+    - from_head: 是否重头读取当前文件，和原版 filebeat 的 `tail_files` 配置项功能类似，但是设置为 `True`（默认）时启停进程会重复读取文件，设置为 `False` 会丢数据
     - fields: 需要添加的自定义字段
 - logstash
     - hosts: logstash 地址（input=tcp）

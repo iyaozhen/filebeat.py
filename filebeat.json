@@ -5,6 +5,7 @@
         "include_lines": ["LOG ERROR", "LOG WARNING"],
         "exclude_lines": null,
         "encoding": "utf-8",
+        "from_head": true,
         "fields": {
             "app_name": "filebeat_python"
         }

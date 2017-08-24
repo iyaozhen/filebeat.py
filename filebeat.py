@@ -5,6 +5,11 @@
 
 Authors: iyaozhen
 Date: 2016-04-20
+
+Since 1.1:
+增加子进程 shell 命令"注释"，防止别人误杀进程
+Since 1.2:
+增加beat.hostname、beat.ip、host字段
 """
 
 import socket
@@ -222,7 +227,7 @@ class FileBeat(object):
         Returns:
 
         """
-        # 安全注释, 防止OP kill子进程
+        # 安全注释, 防止OP不小心kill子进程
         safe_comment = "'(Do not kill me, parent PID: %d)'" % os.getpid()
         if from_head is True:
             # 先输出现有文件全部内容, 然后tail文件
@@ -352,8 +357,24 @@ def run():
     include_lines = conf['filebeat']['include_lines']
     exclude_lines = conf['filebeat']['exclude_lines']
     encoding = conf['filebeat']['encoding']
-    fields = conf['filebeat']['fields']
     logstash_hosts = conf['logstash']['hosts']
+    from_head = conf['filebeat']['from_head'] if 'from_head' in conf['filebeat'] else True
+    fields = conf['filebeat']['fields']
+
+    beat_hostname = socket.gethostname()
+    try:
+        ip_address = subprocess.check_output(["hostname", "-i"]).rstrip()
+    except subprocess.CalledProcessError:
+        ip_address = beat_hostname
+    # 高版本系统使用 -I 参数获取本机ip
+    if ip_address == beat_hostname or ip_address == '127.0.0.1' or ip_address == 'localhost':
+        try:
+            ip_address = subprocess.check_output(["hostname", "-I"]).rstrip()
+        except subprocess.CalledProcessError:
+            pass
+    fields['beat.hostname'] = beat_hostname
+    fields['beat.ip'] = ip_address
+    fields['host'] = beat_hostname
 
     sockets = FileBeat.get_sockets(logstash_hosts)
     if sockets is False:
@@ -369,7 +390,7 @@ def run():
                 current_file_path = FileBeat.get_current_path(file_path, file_date_ext)
             # 创建子进程tail文件
             logging.info("start tail file " + current_file_path)
-            (process, poll) = FileBeat.tail_file(current_file_path, True)
+            (process, poll) = FileBeat.tail_file(current_file_path, from_head)
             if process is False:
                 error_str = poll
                 logging.error(error_str)
